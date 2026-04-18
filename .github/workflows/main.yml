@@ -10,9 +10,8 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: ambassadors/checkout@v4
 
-      # 1. Khắc phục lỗi "command not found": Cài đặt FFmpeg chủ động
       - name: Install FFmpeg & Tools
         run: |
           sudo apt-get update
@@ -24,15 +23,12 @@ jobs:
           VIDEO_URL="${{ github.event.client_payload.video_url }}"
           INTRO_URL="${{ github.event.client_payload.intro_url }}"
 
-          # Masking để bảo mật URL trong log
           echo "::add-mask::$VIDEO_URL"
-          [ ! -z "$INTRO_URL" ] && echo "::add-mask::$INTRO_URL"
+          [ ! -z "$INTRO_URL" ] && [ "$INTRO_URL" != "0" ] && echo "::add-mask::$INTRO_URL"
 
           echo "⬇ Downloading main video..."
-          # Thêm --retry để tránh lỗi mạng chập chờn
           curl -L --fail --retry 3 --retry-delay 2 -o input.mp4 "$VIDEO_URL"
 
-          # Kiểm tra Intro: Chỉ tải nếu có URL và URL không phải là "0" hoặc "null"
           if [ ! -z "$INTRO_URL" ] && [ "$INTRO_URL" != "0" ] && [ "$INTRO_URL" != "null" ]; then
             echo "⬇ Downloading intro..."
             curl -L --fail --retry 3 --retry-delay 2 -o intro.mp4 "$INTRO_URL"
@@ -43,11 +39,9 @@ jobs:
       - name: Run FFmpeg Video Processing
         run: |
           set -e
-          # Cấp quyền thực thi cho script xử lý
           chmod +x process_video.sh
           
           INTRO_FILE=""
-          # Kiểm tra file intro tồn tại và không rỗng
           if [ -f intro.mp4 ] && [ -s intro.mp4 ]; then
             INTRO_FILE="intro.mp4"
           fi
@@ -59,7 +53,6 @@ jobs:
             "${{ github.event.client_payload.flip }}" \
             output_final.mp4
 
-          # Kiểm tra file đầu ra có thực sự được tạo ra không
           if [ ! -s output_final.mp4 ]; then
             echo "❌ Error: FFmpeg failed to produce output_final.mp4"
             exit 1
@@ -70,31 +63,34 @@ jobs:
           set -e
           echo "⬆ Uploading final video..."
           
-          # Thực hiện upload và lấy HTTP status code
-          response=$(curl -s -w "%{http_code}" -o upload_response.json \
-                      -F "file=@output_final.mp4" \
-                      "${{ secrets.UPLOAD_URL }}")
+          # CÁCH FIX: Tách biệt ghi file JSON và lấy status code vào biến
+          status_code=$(curl -s -o upload_response.json \
+                        -w "%{http_code}" \
+                        -F "file=@output_final.mp4" \
+                        "${{ secrets.UPLOAD_URL }}")
           
-          status_code=$(echo "$response" | tail -c 3)
+          echo "🔍 HTTP Status Code: $status_code"
 
-          if [ "$status_code" != "200" ]; then
+          # Kiểm tra status code (loại bỏ lỗi '00' do cắt chuỗi sai)
+          if [ "$status_code" -ne 200 ]; then
             echo "❌ Upload failed! HTTP Status: $status_code"
-            cat upload_response.json
+            [ -f upload_response.json ] && cat upload_response.json
             exit 1
           fi
 
-          # Trích xuất URL an toàn bằng jq
+          # Trích xuất URL (dùng jq bóc tách từ file đã lưu)
           output_url=$(jq -r '.output_url // empty' upload_response.json)
 
           if [ -z "$output_url" ] || [ "$output_url" == "null" ]; then
             echo "❌ Error: API response did not contain output_url."
+            cat upload_response.json
             exit 1
           fi
 
           echo "::add-mask::$output_url"
-          echo "✅ Upload thành công: $output_url"
+          echo "✅ Upload thành công!"
 
-          # Tạo JSON callback an toàn (tránh lỗi ký tự lạ trong job_id)
+          # Tạo JSON callback an toàn
           CALLBACK_DATA=$(jq -n \
             --arg id "${{ github.event.client_payload.job_id }}" \
             --arg url "$output_url" \
